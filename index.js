@@ -7,13 +7,21 @@ const path = require('path');
 const fs = require('fs');
 const swaggerJsDoc = require('swagger-jsdoc');
 const swaggerUi = require('swagger-ui-express');
+const cloudinary = require('cloudinary').v2;
 const City = require('./models/City');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Create uploads directory if it doesn't exist
-const uploadsDir = path.join(__dirname, 'uploads');
+// Cloudinary configuration
+cloudinary.config({ 
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
+// Create temporary uploads directory
+const uploadsDir = path.join(__dirname, 'temp_uploads');
 if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
 }
@@ -21,9 +29,8 @@ if (!fs.existsSync(uploadsDir)) {
 // Middleware
 app.use(cors());
 app.use(bodyParser.json());
-app.use('/uploads', express.static(uploadsDir));
 
-// Multer configuration for file uploads
+// Multer configuration for temporary file uploads
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         cb(null, uploadsDir);
@@ -51,7 +58,7 @@ const upload = multer({
 });
 
 // Connect to MongoDB
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/citydb', {
+mongoose.connect(process.env.MONGODB_URI, {
     useNewUrlParser: true,
     useUnifiedTopology: true
 }).then(() => {
@@ -71,8 +78,8 @@ const swaggerOptions = {
         },
         servers: [
             {
-                url: `http://localhost:${PORT}`,
-                description: 'Development server'
+                url: process.env.BASE_URL || `http://localhost:${PORT}`,
+                description: 'Server'
             }
         ],
     },
@@ -97,7 +104,7 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
  *           description: The city name
  *         image:
  *           type: string
- *           description: The path to the city image
+ *           description: The Cloudinary URL of the city image
  *         phone:
  *           type: string
  *           description: The city phone number
@@ -134,22 +141,26 @@ app.post('/cities', upload.single('image'), async (req, res) => {
             return res.status(400).json({ error: 'Image is required' });
         }
 
-        const relativePath = path.relative(__dirname, req.file.path)
-            .split(path.sep)
-            .join('/');
-
+        // Upload to Cloudinary
+        const result = await cloudinary.uploader.upload(req.file.path);
+        
         const city = new City({
             name,
-            image: relativePath,
+            image: result.secure_url,
             phone
         });
 
         await city.save();
-        res.status(201).json({
-            ...city.toObject(),
-            imageUrl: `/uploads/${path.basename(req.file.path)}`
-        });
+        
+        // Clean up temporary file
+        fs.unlinkSync(req.file.path);
+        
+        res.status(201).json(city);
     } catch (err) {
+        // Clean up temporary file in case of error
+        if (req.file) {
+            fs.unlinkSync(req.file.path);
+        }
         res.status(400).json({ error: err.message });
     }
 });
@@ -172,11 +183,7 @@ app.post('/cities', upload.single('image'), async (req, res) => {
 app.get('/cities', async (req, res) => {
     try {
         const cities = await City.find();
-        const citiesWithUrls = cities.map(city => ({
-            ...city.toObject(),
-            imageUrl: `/uploads/${path.basename(city.image)}`
-        }));
-        res.json(citiesWithUrls);
+        res.json(cities);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -205,10 +212,7 @@ app.get('/cities/:id', async (req, res) => {
         if (!city) {
             return res.status(404).json({ error: 'City not found' });
         }
-        res.json({
-            ...city.toObject(),
-            imageUrl: `/uploads/${path.basename(city.image)}`
-        });
+        res.json(city);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -252,18 +256,18 @@ app.put('/cities/:id', upload.single('image'), async (req, res) => {
         };
 
         if (req.file) {
-            const relativePath = path.relative(__dirname, req.file.path)
-                .split(path.sep)
-                .join('/');
-            updates.image = relativePath;
+            // Upload new image to Cloudinary
+            const result = await cloudinary.uploader.upload(req.file.path);
+            updates.image = result.secure_url;
+            
+            // Clean up temporary file
+            fs.unlinkSync(req.file.path);
 
-            // Delete old image if it exists
+            // Delete old image from Cloudinary if exists
             const oldCity = await City.findById(req.params.id);
             if (oldCity && oldCity.image) {
-                const oldImagePath = path.join(__dirname, oldCity.image);
-                if (fs.existsSync(oldImagePath)) {
-                    fs.unlinkSync(oldImagePath);
-                }
+                const publicId = oldCity.image.split('/').pop().split('.')[0];
+                await cloudinary.uploader.destroy(publicId);
             }
         }
 
@@ -277,11 +281,12 @@ app.put('/cities/:id', upload.single('image'), async (req, res) => {
             return res.status(404).json({ error: 'City not found' });
         }
 
-        res.json({
-            ...city.toObject(),
-            imageUrl: `/uploads/${path.basename(city.image)}`
-        });
+        res.json(city);
     } catch (err) {
+        // Clean up temporary file in case of error
+        if (req.file) {
+            fs.unlinkSync(req.file.path);
+        }
         res.status(400).json({ error: err.message });
     }
 });
@@ -310,12 +315,10 @@ app.delete('/cities/:id', async (req, res) => {
             return res.status(404).json({ error: 'City not found' });
         }
 
-        // Delete the image file if it exists
+        // Delete image from Cloudinary if exists
         if (city.image) {
-            const imagePath = path.join(__dirname, city.image);
-            if (fs.existsSync(imagePath)) {
-                fs.unlinkSync(imagePath);
-            }
+            const publicId = city.image.split('/').pop().split('.')[0];
+            await cloudinary.uploader.destroy(publicId);
         }
 
         await City.findByIdAndDelete(req.params.id);
@@ -339,9 +342,14 @@ app.use((err, req, res, next) => {
     });
 });
 
+// Cleanup temporary files on server shutdown
+process.on('SIGINT', () => {
+    fs.rmSync(uploadsDir, { recursive: true, force: true });
+    process.exit();
+});
+
 // Start the server
 app.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
-    console.log(`Swagger documentation available at http://localhost:${PORT}/api-docs`);
-    console.log(`Uploads directory: ${uploadsDir}`);
+    console.log(`Server is running on ${process.env.BASE_URL || `http://localhost:${PORT}`}`);
+    console.log(`Swagger documentation available at ${process.env.BASE_URL || `http://localhost:${PORT}`}/api-docs`);
 });
