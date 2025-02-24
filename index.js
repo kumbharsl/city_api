@@ -11,7 +11,7 @@ const cloudinary = require('cloudinary').v2;
 const City = require('./models/City');
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 10000;
 
 // Cloudinary configuration
 cloudinary.config({ 
@@ -26,8 +26,16 @@ if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// Middleware
-app.use(cors());
+// CORS Configuration
+app.use(cors({
+    origin: '*', // Be more specific in production
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
+    optionsSuccessStatus: 200
+}));
+
+// Other Middleware
 app.use(bodyParser.json());
 
 // Multer configuration for temporary file uploads
@@ -346,6 +354,11 @@ app.use((err, req, res, next) => {
 process.on('SIGINT', () => {
     fs.rmSync(uploadsDir, { recursive: true, force: true });
     process.exit();
+});
+
+// Test endpoint
+app.get('/test', (req, res) => {
+    res.json({ message: 'API is working!' });
 });
 
 // Start the server
